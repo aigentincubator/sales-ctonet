@@ -4,7 +4,7 @@ from copy import deepcopy
 from urllib.parse import urlencode
 from typing import Optional, List, Tuple, Dict
 
-from flask import Flask, render_template, request, url_for
+from flask import Flask, render_template, request, url_for, g
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 
@@ -29,6 +29,33 @@ def load_data(path: str):
 RAW = load_data(DATA_PATH)
 ALL_CATEGORIES = list(RAW.keys())
 SERIES_ATTR = "Series"
+
+
+CLIENT_CATEGORIES = [
+    "Essential",
+    "Business",
+    "Enterprise",
+]
+PRICE_MATRIX_KEY = "_client_price_matrix"
+
+
+def _build_mock_price_db(raw_data: dict) -> dict[str, dict[str, dict[str, int]]]:
+    """Create deterministic mock pricing tiers for every hardware entry."""
+    price_db: dict[str, dict[str, dict[str, int]]] = {}
+    for cat_idx, (category, products) in enumerate(raw_data.items()):
+        cat_prices: dict[str, dict[str, int]] = {}
+        for prod_idx, (product_name, _) in enumerate(sorted(products.items(), key=lambda x: x[0])):
+            base = 800 + cat_idx * 220 + prod_idx * 25
+            cat_prices[product_name] = {
+                CLIENT_CATEGORIES[0]: base,
+                CLIENT_CATEGORIES[1]: base + 190,
+                CLIENT_CATEGORIES[2]: base + 340,
+            }
+        price_db[category] = cat_prices
+    return price_db
+
+
+PRICE_DB = _build_mock_price_db(RAW)
 
 
 @app.context_processor
@@ -60,21 +87,29 @@ def clear_all_url() -> str:
 def parse_filters(args) -> dict:
     filters = {}
     for k in args.keys():
-        if k in {"category", "short_description", "min_router_mbps", "min_speedfusion_mbps", "min_users", "sort", "embed"}:
+        if k in {"category", "client_category", "short_description", "min_router_mbps", "min_speedfusion_mbps", "min_users", "sort", "embed"}:
             continue
         vals = args.getlist(k)
         # normalize to strings
         vals = [str(v) for v in vals if v is not None]
         if vals:
-            filters[k] = vals
+            filters[k] = [vals[0]]
     return filters
 
 
 @app.template_global()
-def build_url(category: Optional[str], filters: dict) -> str:
+def build_url(category: Optional[str], filters: dict, client_category: Optional[str] = None) -> str:
     # Preserve numeric filters and sort from current request if present
-    preserve_keys = {"min_router_mbps", "min_speedfusion_mbps", "min_users", "sort", "embed"}
+    preserve_keys = {"min_router_mbps", "min_speedfusion_mbps", "min_users", "sort", "embed", "client_category"}
     qs = {k: request.args.get(k) for k in preserve_keys if request.args.get(k) not in (None, "")}
+    if client_category is None:
+        client_category = qs.get("client_category")
+    if client_category not in CLIENT_CATEGORIES:
+        client_category = None
+    if client_category:
+        qs["client_category"] = client_category
+    elif "client_category" in qs:
+        del qs["client_category"]
     if category:
         qs["category"] = category
     for k, vals in filters.items():
@@ -107,23 +142,32 @@ def jinja_norm_filter(s: str) -> str:
 
 @app.template_global()
 def set_category_url(cat: str) -> str:
-    return build_url(cat, {})
+    client_cat = request.args.get("client_category")
+    return build_url(cat, {}, client_cat)
+
+
+@app.template_global()
+def set_client_category_url(client_cat: str) -> str:
+    category = request.args.get("category")
+    filters = parse_filters(request.args)
+    return build_url(category, filters, client_cat)
 
 
 @app.template_global()
 def toggle_filter_url(attr: str, value: str) -> str:
     category = request.args.get("category")
     current = parse_filters(request.args)
-    current_vals = set(current.get(attr, []))
     sval = str(value)
-    if sval in current_vals:
-        current_vals.remove(sval)
+    quick_pick_attrs = getattr(g, "quick_pick_attrs", set())
+    existing = current.get(attr, [])
+    if sval in existing and len(existing) == 1:
+        current.pop(attr, None)
     else:
-        current_vals.add(sval)
-    if current_vals:
-        current[attr] = sorted(current_vals)
-    elif attr in current:
-        del current[attr]
+        current[attr] = [sval]
+        if attr in quick_pick_attrs:
+            for qp_attr in quick_pick_attrs:
+                if qp_attr != attr:
+                    current.pop(qp_attr, None)
     return build_url(category, current)
 
 
@@ -131,7 +175,10 @@ def get_products_in_category(category: Optional[str]):
     if not category or category not in RAW:
         return []
     items = RAW.get(category, {}) or {}
-    return [(name, augment_product_data(dict(data))) for name, data in items.items()]
+    return [
+        (name, augment_product_data(category, name, dict(data)))
+        for name, data in items.items()
+    ]
 
 
 def _parse_int_prefix(value: str) -> int:
@@ -159,7 +206,17 @@ def _yes_no(val: str) -> str:
     return val
 
 
-def augment_product_data(pdata: dict) -> dict:
+def format_price(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(number - round(number)) < 1e-6:
+        return f"${int(round(number)):,}"
+    return f"${number:,.2f}"
+
+
+def augment_product_data(category: str, name: str, pdata: dict) -> dict:
     """Add derived/normalized fields used for better filtering.
 
     - Adds "Modem Group": Single / Multi / None based on "Number of Cellular Modems"
@@ -167,6 +224,11 @@ def augment_product_data(pdata: dict) -> dict:
     - Unifies SpeedFusion throughput key variants
     """
     out = dict(pdata)
+
+    # Attach mock pricing matrix for client categories
+    price_map = PRICE_DB.get(category, {}).get(name)
+    if price_map:
+        out[PRICE_MATRIX_KEY] = price_map
 
     # Derive modem group
     modem_raw = out.get("Number of Cellular Modems")
@@ -353,7 +415,7 @@ def build_attribute_index(products: list[tuple[str, dict]]):
                 "Users Max",
                 "WAN Ports Max",
                 "LAN Ports Max",
-            ):
+            ) or k == PRICE_MATRIX_KEY:
                 continue
             s = idx.setdefault(k, set())
             s.add(str(v))
@@ -375,16 +437,17 @@ def compute_salience(products_all: list[tuple[str, dict]]):
 
 def count_with_toggled(products_all, current_filters: dict, attr: str, val: str, numeric_filters: Optional[dict] = None) -> int:
     f = deepcopy(current_filters)
-    s = set(f.get(attr, []))
     sval = str(val)
-    if sval in s:
-        s.remove(sval)
+    quick_pick_attrs = getattr(g, "quick_pick_attrs", set())
+    existing = f.get(attr, [])
+    if sval in existing and len(existing) == 1:
+        f.pop(attr, None)
     else:
-        s.add(sval)
-    if s:
-        f[attr] = list(s)
-    elif attr in f:
-        del f[attr]
+        f[attr] = [sval]
+        if attr in quick_pick_attrs:
+            for qp_attr in quick_pick_attrs:
+                if qp_attr != attr:
+                    f.pop(qp_attr, None)
     return len(apply_filters(products_all, f, numeric_filters))
 
 
@@ -394,9 +457,13 @@ def count_with_included(products_all, current_filters: dict, attr: str, val: str
     This is used for subcategory chips so counts don't jump when a chip is already active.
     """
     f = deepcopy(current_filters)
-    s = set(f.get(attr, []))
-    s.add(str(val))
-    f[attr] = list(s)
+    sval = str(val)
+    quick_pick_attrs = getattr(g, "quick_pick_attrs", set())
+    f[attr] = [sval]
+    if attr in quick_pick_attrs:
+        for qp_attr in quick_pick_attrs:
+            if qp_attr != attr:
+                f.pop(qp_attr, None)
     return len(apply_filters(products_all, f, numeric_filters))
 
 
@@ -470,6 +537,9 @@ def index():
     filters = parse_filters(request.args)
     numeric_filters = parse_numeric_filters(request.args)
     sort_key = request.args.get("sort")
+    client_category = request.args.get("client_category")
+    if client_category not in CLIENT_CATEGORIES:
+        client_category = CLIENT_CATEGORIES[0]
 
     products_all = get_products_in_category(category)
     salience_order = compute_salience(products_all) if category else []
@@ -530,7 +600,7 @@ def index():
             selected = set(filters.get(attr, []))
             value_items = []
             for val in values_sorted:
-                n = count_with_toggled(products_all, filters, attr, val, numeric_filters)
+                n = count_with_included(products_all, filters, attr, val, numeric_filters)
                 value_items.append({
                     "value": val,
                     "count": n,
@@ -544,16 +614,19 @@ def index():
             })
 
     # Quick picks for Mobile Routers (Single/Multi modem and 5G)
+    quick_pick_attrs: set[str] = set()
+    g.quick_pick_attrs = quick_pick_attrs
     quick_picks = []
     if category == "Mobile Routers":
         def add_quick(label: str, attr: str, val: str):
             if attr not in attr_index_all:
                 return
+            quick_pick_attrs.add(attr)
             quick_picks.append({
                 "label": label,
                 "attr": attr,
                 "value": val,
-                "count": count_with_toggled(products_all, filters, attr, val, numeric_filters),
+                "count": count_with_included(products_all, filters, attr, val, numeric_filters),
                 "active": val in set(filters.get(attr, [])),
             })
 
@@ -582,12 +655,35 @@ def index():
     for name, pdata in products_sorted:
         keys = pick_summary_keys(pdata)
         # Raw values for on-screen display (templated via |norm)
-        summary_pairs = [(k, str(pdata.get(k, ""))) for k in keys]
+        summary_pairs = []
+
+        price_map = pdata.get(PRICE_MATRIX_KEY, {})
+        price_value = price_map.get(client_category)
+        price_label = f"Price ({client_category})"
+        if price_value is not None:
+            price_display = format_price(price_value)
+            summary_pairs.append((price_label, price_display))
+        else:
+            price_display = None
+
+        summary_pairs.extend((k, str(pdata.get(k, ""))) for k in keys)
+
         # Normalized pairs for clipboard copy
-        summary_pairs_norm = [
-            (_normalize_display_value(k), _normalize_display_value(str(pdata.get(k, ""))))
+        summary_pairs_norm = []
+        if price_value is not None and price_display is not None:
+            summary_pairs_norm.append(
+                (
+                    _normalize_display_value(price_label),
+                    _normalize_display_value(price_display),
+                )
+            )
+        summary_pairs_norm.extend(
+            (
+                _normalize_display_value(k),
+                _normalize_display_value(str(pdata.get(k, ""))),
+            )
             for k in keys
-        ]
+        )
         product_cards.append({
             "name": name,
             "description": pdata.get("short_description"),
@@ -600,6 +696,8 @@ def index():
     sel_lines: list[str] = []
     if category:
         sel_lines.append(f"Category: {_normalize_display_value(category)}")
+    if client_category:
+        sel_lines.append(f"Client Category: {_normalize_display_value(client_category)}")
     for attr in sorted(filters.keys(), key=lambda s: s.lower()):
         vals = ", ".join(_normalize_display_value(v) for v in filters[attr])
         sel_lines.append(f"{_normalize_display_value(attr)}: {vals}")
@@ -615,6 +713,8 @@ def index():
         "index.html",
         categories=ALL_CATEGORIES,
         category=category,
+        client_categories=CLIENT_CATEGORIES,
+        client_category=client_category,
         subcategories=subcategory_values,
         subcategory_attr=SERIES_ATTR,
         quick_picks=quick_picks,

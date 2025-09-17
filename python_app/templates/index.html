@@ -1,16 +1,27 @@
 {% extends 'base.html' %}
 
 {% block content %}
+  {% set step = namespace(value=1) %}
   <section class="panel left">
-    <h2>1. Choose Category</h2>
+    <h2>{{ step.value }}. Choose Category</h2>
     <div class="chips">
       {% for cat in categories %}
         <a class="chip{% if category == cat %} active{% endif %}" data-kind="category" href="{{ set_category_url(cat) }}">{{ cat }}</a>
       {% endfor %}
     </div>
 
+    {% set step.value = step.value + 1 %}
+    <h2>{{ step.value }}. Choose Client Category</h2>
+    <div class="chips">
+      {% for client in client_categories %}
+        <a class="chip{% if client_category == client %} active{% endif %}"
+           href="{{ set_client_category_url(client) }}">{{ client }}</a>
+      {% endfor %}
+    </div>
+
     {% if category and subcategories and subcategories|length > 0 %}
-      <h2>2. Choose Subcategory</h2>
+      {% set step.value = step.value + 1 %}
+      <h2>{{ step.value }}. Choose Subcategory</h2>
       <div class="chips">
         {% for sc in subcategories %}
           <a class="chip{% if sc.active %} active{% endif %}"
@@ -25,7 +36,8 @@
     {% set has_quick = category and quick_picks and (quick_picks|length > 0) %}
 
     {% if has_quick %}
-      <h2>{{ 3 if has_subcats else 2 }}. Quick Picks</h2>
+      {% set step.value = step.value + 1 %}
+      <h2>{{ step.value }}. Quick Picks</h2>
       <div class="chips">
         {% for qp in quick_picks %}
           <a class="chip{% if qp.active %} active{% endif %}"
@@ -37,10 +49,12 @@
     {% endif %}
 
     <div class="filters{% if not category %} hidden{% endif %}" id="filtersSection">
-      <h2>{{ 2 + (1 if has_subcats else 0) + (1 if has_quick else 0) }}. Narrow by Attributes</h2>
+      {% if category %}{% set step.value = step.value + 1 %}{% endif %}
+      <h2>{{ step.value }}. Narrow by Attributes</h2>
 
       <form class="range-filters" method="get">
         <input type="hidden" name="category" value="{{ category }}" />
+        <input type="hidden" name="client_category" value="{{ client_category }}" />
         {# Preserve selected categorical filters #}
         {% for attr, vals in filters.items() %}
           {% for val in vals %}
@@ -111,6 +125,7 @@
       <form class="sort-form" method="get">
         {# Preserve current args #}
         {% if category %}<input type="hidden" name="category" value="{{ category }}" />{% endif %}
+        {% if client_category %}<input type="hidden" name="client_category" value="{{ client_category }}" />{% endif %}
         {% for attr, vals in filters.items() %}
           {% for val in vals %}
             <input type="hidden" name="{{ attr }}" value="{{ val }}" />
