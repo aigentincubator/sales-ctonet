@@ -1,0 +1,19 @@
+{ 
+  email {$EMAIL}
+}
+
+{$DOMAIN} {
+  encode gzip zstd
+  @static path /static/*
+  handle_path @static {
+    reverse_proxy app:8000
+  }
+  reverse_proxy app:8000
+  header {
+    # Allow only peplink.com domains to embed
+    Content-Security-Policy "frame-ancestors 'self' https://peplink.com https://www.peplink.com https://*.peplink.com"
+    # Avoid conflicting legacy header
+    -X-Frame-Options
+  }
+}
+

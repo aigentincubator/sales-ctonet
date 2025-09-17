@@ -1,0 +1,208 @@
+{% extends 'base.html' %}
+
+{% block content %}
+  <section class="panel left">
+    <h2>1. Choose Category</h2>
+    <div class="chips">
+      {% for cat in categories %}
+        <a class="chip{% if category == cat %} active{% endif %}" data-kind="category" href="{{ set_category_url(cat) }}">{{ cat }}</a>
+      {% endfor %}
+    </div>
+
+    {% if category and subcategories and subcategories|length > 0 %}
+      <h2>2. Choose Subcategory</h2>
+      <div class="chips">
+        {% for sc in subcategories %}
+          <a class="chip{% if sc.active %} active{% endif %}"
+             href="{{ toggle_filter_url(subcategory_attr, sc.value) }}">
+            {{ sc.value|norm }} ({{ sc.count }})
+          </a>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% set has_subcats = category and subcategories and (subcategories|length > 0) %}
+    {% set has_quick = category and quick_picks and (quick_picks|length > 0) %}
+
+    {% if has_quick %}
+      <h2>{{ 3 if has_subcats else 2 }}. Quick Picks</h2>
+      <div class="chips">
+        {% for qp in quick_picks %}
+          <a class="chip{% if qp.active %} active{% endif %}"
+             href="{{ toggle_filter_url(qp.attr, qp.value) }}">
+            {{ qp.label }} ({{ qp.count }})
+          </a>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <div class="filters{% if not category %} hidden{% endif %}" id="filtersSection">
+      <h2>{{ 2 + (1 if has_subcats else 0) + (1 if has_quick else 0) }}. Narrow by Attributes</h2>
+
+      <form class="range-filters" method="get">
+        <input type="hidden" name="category" value="{{ category }}" />
+        {# Preserve selected categorical filters #}
+        {% for attr, vals in filters.items() %}
+          {% for val in vals %}
+            <input type="hidden" name="{{ attr }}" value="{{ val }}" />
+          {% endfor %}
+        {% endfor %}
+        {% if sort %}<input type="hidden" name="sort" value="{{ sort }}" />{% endif %}
+        {% if request.args.get('embed') %}<input type="hidden" name="embed" value="{{ request.args.get('embed') }}" />{% endif %}
+
+        <div class="range-row">
+          <label>Min Router Throughput (Mbps)</label>
+          <input type="number" inputmode="numeric" name="min_router_mbps" value="{{ numeric_filters.min_router_mbps or '' }}" placeholder="e.g. 1000" />
+        </div>
+        <div class="range-row">
+          <label>Min SpeedFusion (Mbps)</label>
+          <input type="number" inputmode="numeric" name="min_speedfusion_mbps" value="{{ numeric_filters.min_speedfusion_mbps or '' }}" placeholder="e.g. 400" />
+        </div>
+        <div class="range-row">
+          <label>Min Users</label>
+          <input type="number" inputmode="numeric" name="min_users" value="{{ numeric_filters.min_users or '' }}" placeholder="e.g. 100" />
+        </div>
+        <div class="range-actions">
+          <button class="btn" type="submit">Apply</button>
+          <a class="btn btn-secondary" href="{{ build_url(category, filters) }}">Clear</a>
+        </div>
+      </form>
+
+      <div class="active-filters" id="activeFilters">
+        {% for attr, vals in filters.items() %}
+          {% for val in vals %}
+            <a class="chip" href="{{ toggle_filter_url(attr, val) }}">
+              {{ attr|norm }}: {{ val|norm }} <span class="remove">×</span>
+            </a>
+          {% endfor %}
+        {% endfor %}
+      </div>
+
+      <div class="attributes" id="attributesContainer">
+        {% for group in attributes %}
+          <div class="attribute-group">
+            <div class="attribute-header">
+              <h3>{{ group.name }}</h3>
+              <span class="count">
+                {% if group.selected_count %}
+                  {{ group.selected_count }} selected
+                {% else %}
+                  {{ group.options_count }} options
+                {% endif %}
+              </span>
+            </div>
+            <div class="attribute-values">
+              {% for item in group['values'] %}
+                <a class="chip{% if item.active %} active{% endif %}"
+                   href="{{ toggle_filter_url(group.name, item.value) }}">
+                  {{ item.value|norm }} ({{ item.count }})
+                </a>
+              {% endfor %}
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="panel right">
+    <div class="results-header">
+      <h2>Results</h2>
+      <form class="sort-form" method="get">
+        {# Preserve current args #}
+        {% if category %}<input type="hidden" name="category" value="{{ category }}" />{% endif %}
+        {% for attr, vals in filters.items() %}
+          {% for val in vals %}
+            <input type="hidden" name="{{ attr }}" value="{{ val }}" />
+          {% endfor %}
+        {% endfor %}
+        {% if numeric_filters.min_router_mbps is not none %}<input type="hidden" name="min_router_mbps" value="{{ numeric_filters.min_router_mbps }}" />{% endif %}
+        {% if numeric_filters.min_speedfusion_mbps is not none %}<input type="hidden" name="min_speedfusion_mbps" value="{{ numeric_filters.min_speedfusion_mbps }}" />{% endif %}
+        {% if numeric_filters.min_users is not none %}<input type="hidden" name="min_users" value="{{ numeric_filters.min_users }}" />{% endif %}
+        {% if request.args.get('embed') %}<input type="hidden" name="embed" value="{{ request.args.get('embed') }}" />{% endif %}
+        <label for="sort">Sort</label>
+        <select name="sort" id="sort" onchange="this.form.submit()">
+          <option value="name_asc"{% if sort == 'name_asc' or not sort %} selected{% endif %}>Name (A–Z)</option>
+          <option value="router_desc"{% if sort == 'router_desc' %} selected{% endif %}>Router Throughput (desc)</option>
+          <option value="speedfusion_desc"{% if sort == 'speedfusion_desc' %} selected{% endif %}>SpeedFusion (desc)</option>
+          <option value="users_desc"{% if sort == 'users_desc' %} selected{% endif %}>Recommended Users (desc)</option>
+        </select>
+      </form>
+      <div class="results-meta" id="resultsMeta">
+        {{ results_count }} match{% if results_count != 1 %}es{% endif %}{% if category %} in {{ category }}{% endif %}
+      </div>
+    </div>
+    <div class="results-grid" id="resultsGrid">
+      {% for item in results %}
+        <div class="card">
+          <h4>{{ item.name }}</h4>
+          {% if item.description %}
+            <p class="desc">{{ item.description|norm }}</p>
+          {% endif %}
+          <div class="kv">
+            {% for k, v in item.summary %}
+              <div class="k">{{ k|norm }}</div>
+              <div class="v">{{ v|norm }}</div>
+            {% endfor %}
+          </div>
+          <div class="actions">
+            {% if item.pdf_url %}
+              <a class="link" href="{{ item.pdf_url }}" target="_blank" rel="noopener">Data Sheet</a>
+            {% endif %}
+            <button type="button" class="btn btn-secondary copy-btn"
+                    data-name="{{ item.name|e }}"
+                    data-pdf="{{ (item.pdf_url or '')|e }}"
+                    data-summary='{{ item.summary_copy | tojson }}'>Copy Summary</button>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+  <script>
+    (function(){
+      const selectionsText = `{{ (selections_text or '')|e }}`;
+      function fallbackCopy(text, btn){
+        const ta=document.createElement('textarea');
+        ta.value=text; document.body.appendChild(ta); ta.select();
+        try{ document.execCommand('copy'); }catch(e){}
+        document.body.removeChild(ta);
+        if(btn){ btn.textContent='Copied!'; setTimeout(()=>{ btn.textContent='Copy Summary'; }, 1200); }
+      }
+      document.addEventListener('click', (e)=>{
+        const btn = e.target.closest('.copy-btn');
+        if(!btn) return;
+        const name = btn.dataset.name || '';
+        const pdf = btn.dataset.pdf || '';
+        let summaryPairs = [];
+        try { summaryPairs = JSON.parse(btn.dataset.summary || '[]'); } catch(_) {}
+        const lines = [];
+        lines.push(`Model: ${name}`);
+        if (pdf) lines.push(`Link: ${pdf}`);
+        lines.push('');
+        if (summaryPairs.length){
+          lines.push('Key Specs:');
+          summaryPairs.forEach(function(pair){
+            if(Array.isArray(pair) && pair.length === 2){
+              lines.push(`- ${pair[0]}: ${pair[1]}`);
+            }
+          });
+          lines.push('');
+        }
+        if (selectionsText.trim()){
+          lines.push('Selections:');
+          selectionsText.split('\n').forEach(l=>lines.push(`- ${l}`));
+          lines.push('');
+        }
+        // No website URL in summary
+        const text = lines.join('\n');
+        if (navigator.clipboard && window.isSecureContext){
+          navigator.clipboard.writeText(text).then(()=>{
+            btn.textContent='Copied!'; setTimeout(()=>{ btn.textContent='Copy Summary'; }, 1200);
+          }).catch(()=> fallbackCopy(text, btn));
+        } else {
+          fallbackCopy(text, btn);
+        }
+      });
+    })();
+  </script>
+{% endblock %}
