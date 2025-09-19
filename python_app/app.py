@@ -39,6 +39,35 @@ CLIENT_CATEGORIES = [
 PRICE_MATRIX_KEY = "_client_price_matrix"
 
 
+QuickPickSpec = Tuple[str, str, str]
+
+
+def _get_quick_pick_specs(category: Optional[str]) -> List[QuickPickSpec]:
+    """Return quick pick definitions (label, attr, value) for the category."""
+    base: List[QuickPickSpec] = [
+        ("Single Modem", "Modem Group", "Single"),
+        ("Multi Modem", "Modem Group", "Multi"),
+        ("5G", "5G support", "Yes"),
+    ]
+    extras: Dict[str, List[QuickPickSpec]] = {
+        "SOHO Routers": [
+            ("Wi-Fi AP", "Wi‑Fi AP", "Yes"),
+        ],
+        "Enterprise Routers": [
+            ("Wi-Fi AP", "Wi‑Fi AP", "Yes"),
+        ],
+    }
+    seen: set[tuple[str, str]] = set()
+    picks: List[QuickPickSpec] = []
+    for label, attr, val in base + extras.get(category, []):
+        key = (attr, val)
+        if key in seen:
+            continue
+        seen.add(key)
+        picks.append((label, attr, val))
+    return picks
+
+
 def _build_mock_price_db(raw_data: dict) -> dict[str, dict[str, dict[str, int]]]:
     """Create deterministic mock pricing tiers for every hardware entry."""
     price_db: dict[str, dict[str, dict[str, int]]] = {}
@@ -613,13 +642,16 @@ def index():
                 "values": value_items,
             })
 
-    # Quick picks for Mobile Routers (Single/Multi modem and 5G)
+    # Quick picks per category (surface popular attribute shortcuts)
     quick_pick_attrs: set[str] = set()
     g.quick_pick_attrs = quick_pick_attrs
     quick_picks = []
-    if category == "Mobile Routers":
+    if category:
+        attr_values_cache = attr_index_all
+
         def add_quick(label: str, attr: str, val: str):
-            if attr not in attr_index_all:
+            values = attr_values_cache.get(attr)
+            if not values or val not in values:
                 return
             quick_pick_attrs.add(attr)
             quick_picks.append({
@@ -630,9 +662,8 @@ def index():
                 "active": val in set(filters.get(attr, [])),
             })
 
-        add_quick("Single Modem", "Modem Group", "Single")
-        add_quick("Multi Modem", "Modem Group", "Multi")
-        add_quick("5G", "5G support", "Yes")
+        for label, attr, val in _get_quick_pick_specs(category):
+            add_quick(label, attr, val)
 
     # Sorting
     def sort_products(items: list[tuple[str, dict]], key: Optional[str]) -> list[tuple[str, dict]]:
